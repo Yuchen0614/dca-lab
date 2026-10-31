@@ -1,0 +1,222 @@
+/* api.js — 資料層。全部走交易所／行情網站的公開端點，不需要任何 API key。
+
+   為什麼要三層備援：這個站是純靜態（GitHub Pages），瀏覽器直接打交易所，
+   所以能不能用完全取決於 (1) CORS (2) 地區封鎖 (3) 速率限制。
+   實測：api.binance.com 與 data-api.binance.vision 都回 Access-Control-Allow-Origin: *，
+   但 Bybit / OKX 公開端點不回 ACAO，瀏覽器端根本讀不到 → 不用。
+   CoinGecko 有 ACAO，當作第三層（只有日線收盤價，沒有日內）。
+   最後一層是打包在站內的 data/snapshot.json（幾檔主流的完整日線），
+   連不到網路時至少還能跑 BTC / ETH 展示，不會整個白畫面。 */
+
+import { DAY, num } from './util.js';
+
+const EP = {
+  binance: 'https://api.binance.com',
+  vision: 'https://data-api.binance.vision',
+  cg: 'https://api.coingecko.com/api/v3'
+};
+
+/* 資料來源狀態。不能叫 api：app.js 用 `import * as api` 匯入命名空間，
+   兩者同名會讓 status.source 讀到 undefined（namespace 上沒有 source 這個鍵）。 */
+export const status = { source: '—', lastError: null, cacheHits: 0, note: null };
+
+async function jget(url, timeout = 15000) {
+  const ac = new AbortController();
+  const to = setTimeout(() => ac.abort(), timeout);
+  try {
+    const r = await fetch(url, { signal: ac.signal, cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  } finally { clearTimeout(to); }
+}
+
+/* ── 快取：記憶體 + sessionStorage ──────────────────── */
+const mem = new Map();
+const SS = 'dcalab.';
+function ssGet(key, ttl) {
+  try {
+    const raw = sessionStorage.getItem(SS + key);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (Date.now() - o.t > ttl) return null;
+    return o.v;
+  } catch (e) { return null; }
+}
+function ssSet(key, v) {
+  try {
+    const raw = JSON.stringify({ t: Date.now(), v });
+    if (raw.length > 250000) return;               // 太大就不要佔 sessionStorage 配額
+    sessionStorage.setItem(SS + key, raw);
+  } catch (e) { /* 配額滿就略過 */ }
+}
+async function cached(key, ttl, fn) {
+  const hit = mem.get(key);
+  if (hit && Date.now() - hit.t < ttl) { status.cacheHits++; return hit.v; }
+  const s = ssGet(key, ttl);
+  if (s) { status.cacheHits++; mem.set(key, { t: Date.now(), v: s }); return s; }
+  const v = await fn();
+  if (v !== undefined && v !== null) { mem.set(key, { t: Date.now(), v }); ssSet(key, v); }
+  return v;
+}
+
+/* ── 日線 K 線 ──────────────────────────────────────── */
+/* 回傳 [{t, c}]；t 為 UTC 00:00。pageSize=1000（Binance 上限）。 */
+async function binanceKlines(base, symbol, startMs, endMs) {
+  const out = [];
+  let from = startMs;
+  for (let i = 0; i < 12; i++) {
+    const u = `${base}/api/v3/klines?symbol=${symbol}&interval=1d&limit=1000&startTime=${from}` + (endMs ? `&endTime=${endMs}` : '');
+    const j = await jget(u);
+    if (!Array.isArray(j) || !j.length) break;
+    for (const k of j) out.push({ t: k[0], c: num(k[4]) });
+    if (j.length < 1000) break;
+    from = j[j.length - 1][0] + DAY;
+    if (endMs && from > endMs) break;
+  }
+  return out;
+}
+
+/* CoinGecko：需要幣種 id，只列常見主流（備援用，抓不到就算了） */
+const CG_ID = {
+  BTC: 'bitcoin', ETH: 'ethereum', BNB: 'binancecoin', SOL: 'solana', XRP: 'ripple', ADA: 'cardano',
+  DOGE: 'dogecoin', TRX: 'tron', DOT: 'polkadot', LTC: 'litecoin', LINK: 'chainlink', AVAX: 'avalanche-2',
+  MATIC: 'matic-network', TON: 'the-open-network', SHIB: 'shiba-inu', ATOM: 'cosmos', XLM: 'stellar',
+  NEAR: 'near', FIL: 'filecoin', ETC: 'ethereum-classic', UNI: 'uniswap', APT: 'aptos', ARB: 'arbitrum',
+  OP: 'optimism', SUI: 'sui', BCH: 'bitcoin-cash', ICP: 'internet-computer', HBAR: 'hedera-hashgraph',
+  PEPE: 'pepe', WIF: 'dogwifcoin', INJ: 'injective-protocol', TIA: 'celestia', SEI: 'sei-network',
+  RNDR: 'render-token', ALGO: 'algorand', VET: 'vechain', SAND: 'the-sandbox', MANA: 'decentraland',
+  AXS: 'axie-infinity', GRT: 'the-graph', EOS: 'eos', AAVE: 'aave', MKR: 'maker', CRV: 'curve-dao-token'
+};
+/* CoinGecko 公開 API 一次最多只能查約 365 天的區間（超過會回 401 error_code 10012
+   「exceeds the allowed time range」）。所以要自己切成一年一段往前抓，
+   每段之間停一下避免被限流；已經抓到資料後某一段失敗就沿用現有的並跳過，
+   整段都抓不到才往上拋（讓呼叫端換下一層備援）。 */
+const CG_WINDOW = 360 * DAY;
+async function cgChunk(id, from, to) {
+  const u = `${EP.cg}/coins/${id}/market_chart/range?vs_currency=usd&from=${Math.floor(from / 1000)}&to=${Math.floor(to / 1000)}`;
+  const j = await jget(u, 25000);
+  const arr = (j && j.prices) || [];
+  /* 回傳是每小時／每日混合；只留「每天最後一筆」當收盤價，避免同一天多點。 */
+  const byDay = new Map();
+  for (const [ts, p] of arr) byDay.set(Math.floor(ts / DAY) * DAY, num(p));
+  return [...byDay.entries()].map(([t, c]) => ({ t, c })).sort((a, b) => a.t - b.t);
+}
+
+async function cgKlines(symbol, startMs, endMs) {
+  const base = symbol.replace(/USDT$/, '');
+  const id = CG_ID[base];
+  if (!id) throw new Error('CoinGecko 無此幣種對照：' + base);
+  const to = endMs || Date.now();
+  /* 實測：CoinGecko 免費層不只看「單次查詢長度」，也限制「能回溯多久」——
+     查 2017 年開始的區間，就算切成一年一段，每一段都回 401 error_code 10012
+     （historical data within the past 365 days）。所以這裡直接夾到近 355 天，
+     並把「期間被縮短」記在 status.note 讓畫面顯示，不讓使用者以為跑的是原區間。 */
+  const oldest = Date.now() - 355 * DAY;
+  const ask = startMs || oldest;
+  const from = Math.max(ask, oldest);
+  if (ask < oldest) status.note = 'CoinGecko 免費層僅提供近 365 天日線，回測期間已自動調整';
+  const windows = [];
+  for (let a = from; a < to; a += CG_WINDOW) windows.push([a, Math.min(a + CG_WINDOW, to)]);
+  const out = new Map();
+  let fails = 0;
+  for (let i = 0; i < windows.length; i++) {
+    const [a, b] = windows[i];
+    const key = `cg|${id}|${Math.floor(a / DAY)}|${Math.floor(b / DAY)}`;
+    try {
+      const rows = await cached(key, 6 * 3600e3, () => cgChunk(id, a, b));
+      for (const r of rows) out.set(r.t, r.c);
+    } catch (e) {
+      fails++;
+      if (out.size === 0 && fails >= 2) throw e;      // 完全抓不到就換下一層
+    }
+    if (i < windows.length - 1) await new Promise(r => setTimeout(r, 2200));  // 公開 API 限流
+  }
+  return [...out.entries()].map(([t, c]) => ({ t, c })).sort((a, b) => a.t - b.t);
+}
+
+const SNAP = 'data/snapshot.json';
+export async function fetchKlines(symbol, startMs, endMs) {
+  const key = `k1|${symbol}|${startMs || 0}|${endMs || 0}`;
+  const hitsBefore = status.cacheHits;
+  status.note = null;            // 每次重新評估，避免上一次的提示殘留
+  const got = await cached(key, 10 * 60e3, async () => {
+    const tries = [
+      ['Binance', () => binanceKlines(EP.binance, symbol, startMs, endMs)],
+      ['Binance Vision', () => binanceKlines(EP.vision, symbol, startMs, endMs)],
+      ['CoinGecko', () => cgKlines(symbol, startMs, endMs)],
+      ['內建快照', async () => snapshot(symbol, startMs, endMs)]
+    ];
+    for (const [name, fn] of tries) {
+      try {
+        const rows = await fn();
+        if (rows && rows.length > 2) {
+          status.source = name;
+          status.lastError = null;
+          if (name !== 'CoinGecko') status.note = null;   // 換到別的來源就不該再顯示它的限制
+          return rows;
+        }
+        status.lastError = `${name}：沒有資料`;
+      } catch (e) { status.lastError = `${name}：${e.message}`; }
+    }
+    return null;
+  });
+  /* 這次是直接從快取拿到資料、完全沒連網（同一個分頁 10 分鐘內再切回來）：
+     仍然要讓使用者知道資料是哪來的，不能顯示空白。 */
+  if (status.cacheHits > hitsBefore && status.source === '—') status.source = '快取';
+  return got;
+}
+
+let snapCache = null;
+async function snapshot(symbol, startMs, endMs) {
+  if (!snapCache) snapCache = await jget(SNAP, 8000);
+  const s = snapCache && snapCache.series && snapCache.series[symbol];
+  if (!s) throw new Error('內建快照沒有這個幣種');
+  return s.map(([d, c]) => ({ t: d * DAY, c })).filter(r => (!startMs || r.t >= startMs) && (!endMs || r.t <= endMs));
+}
+
+/* ── 市場幣種清單 ────────────────────────────────────── */
+/* 用 24hr ticker 依成交額排序：使用者想找的通常是熱門幣，不該讓他捲一長串。 */
+export async function fetchUniverse() {
+  return cached('univ', 10 * 60e3, async () => {
+    try {
+      const [info, tk] = await Promise.all([
+        jget(EP.binance + '/api/v3/exchangeInfo', 20000),
+        jget(EP.binance + '/api/v3/ticker/24hr', 20000)
+      ]);
+      const ok = new Set();
+      for (const s of info.symbols || []) {
+        if (s.status === 'TRADING' && s.quoteAsset === 'USDT' && s.isSpotTradingAllowed !== false) ok.add(s.symbol);
+      }
+      const STABLE = /^(USDC|FDUSD|TUSD|BUSD|DAI|USDP|EURI|AEUR|USD1|XUSD|USDE|PYUSD|USDJ|SUSD|USTC|GBP|TRY|BRL|ARS|JPY|ZAR|PLN|RON|CZK|MXN|COP|UAH|NGN|IDRT|BIDR|VAI|BVND|PAXG|EUR)$/;
+      const list = [];
+      for (const t of tk) {
+        if (!ok.has(t.symbol)) continue;
+        const base = t.symbol.slice(0, -4);
+        if (STABLE.test(base) || /(UP|DOWN|BULL|BEAR)$/.test(base)) continue;
+        const qv = num(t.quoteVolume);
+        if (!(qv > 0)) continue;
+        list.push({ symbol: t.symbol, base, price: num(t.lastPrice), chg: num(t.priceChangePercent), qv });
+      }
+      list.sort((a, b) => b.qv - a.qv);
+      return list;
+    } catch (e) {
+      status.lastError = '幣種清單：' + e.message;
+      return FALLBACK_LIST;
+    }
+  });
+}
+
+export const FALLBACK_LIST = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'TONUSDT', 'DOTUSDT', 'LTCUSDT']
+  .map(s => ({ symbol: s, base: s.slice(0, -4), price: NaN, chg: NaN, qv: 0 }));
+
+/* ── 匯率：USDT → TWD（單純為了讓金額看得懂，只抓即時值）── */
+export async function fetchUsdTwd() {
+  return cached('fx', 60 * 60e3, async () => {
+    try {
+      const j = await jget(EP.cg + '/simple/price?ids=tether&vs_currencies=twd', 12000);
+      const v = num(j && j.tether && j.tether.twd);
+      if (v > 5 && v < 200) return v;
+    } catch (e) { /* 略過，用預設 */ }
+    return 32;
+  });
+}

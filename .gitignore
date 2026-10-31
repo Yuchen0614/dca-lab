@@ -1,0 +1,7 @@
+# 字型建置過程下載的原始檔（10 MB 級），不需要進版控
+.fontbuild/
+__pycache__/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
