@@ -93,11 +93,24 @@ export function mount(canvas, cfg, tooltipEl) {
       window.addEventListener('resize', () => render(canvas, tooltipEl));
     }
   }
-  if (cfg.animate === false) { state.progress = 1; render(canvas, tooltipEl); return; }
-  /* 由左而右揭示的入場動畫：400ms，只影響內容，不影響座標軸 */
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  /* 背景分頁不會執行 requestAnimationFrame：如果只靠 rAF 推進，canvas 會停在從未繪製的
+     狀態（300×150 的空白畫布）。所以隱藏中或使用者要求減少動態時，直接畫完成態；
+     正常情況也補一個 timeout 兜底，保證 800ms 內一定出現完整圖形。 */
+  if (cfg.animate === false || document.hidden || reduce) {
+    state.progress = 1;
+    render(canvas, tooltipEl);
+    return;
+  }
+  /* 由左而右揭示的入場動畫：420ms，只影響內容，不影響座標軸 */
   const tok = ++state.token;
   const t0 = performance.now();
   state.progress = 0;
+  const finish = () => {
+    if (state.token !== tok) return;
+    state.progress = 1;
+    render(canvas, tooltipEl);
+  };
   const step = () => {
     if (state.token !== tok) return;
     const p = Math.min(1, (performance.now() - t0) / 420);
@@ -106,6 +119,7 @@ export function mount(canvas, cfg, tooltipEl) {
     if (p < 1) requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
+  setTimeout(() => { if (state.progress < 1) finish(); }, 800);
 }
 
 export function redrawAll() { registry.forEach(c => { const s = c.__chart; if (s) render(c, s.tooltip); }); }

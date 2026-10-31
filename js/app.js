@@ -219,17 +219,27 @@ const FMT = {
   /* 比率（夏普、卡瑪）固定兩位：0.29 不該被顯示成 0.289120 */
   num2: v => (isFinite(v) ? v.toFixed(2) : '—')
 };
+/* 進場動畫。兩個保險：
+   1. 背景分頁的 requestAnimationFrame 會被瀏覽器暫停，動畫會停在起始值——
+      所以動畫開始前先看 document.hidden，隱藏中就只寫終值。（實測：用背景分頁開站，
+      KPI 會停在 $21 / $0.00000000 這種半路數字，看起來像算錯。）
+   2. 就算跑到一半被暫停（切走分頁、系統忙碌），也一定要回到終值，
+      所以另外掛一個 timeout 兜底。數字錯了比沒有動畫嚴重得多。 */
 function animV(el, to, fmtKey, from = 0) {
   const fmt = FMT[fmtKey] || (v => String(v));
   if (!isFinite(to)) { el.textContent = fmt(to); return; }
-  const t0 = performance.now(), dur = 480;
   cancelAnimationFrame(el.__raf);
+  clearTimeout(el.__t);
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (document.hidden || reduce) { el.textContent = fmt(to); return; }
+  const t0 = performance.now(), dur = 480;
   const step = () => {
     const p = Math.min(1, (performance.now() - t0) / dur);
     const e = 1 - Math.pow(1 - p, 3);
     el.textContent = fmt(from + (to - from) * e);
     if (p < 1) el.__raf = requestAnimationFrame(step);
   };
+  el.__t = setTimeout(() => { cancelAnimationFrame(el.__raf); el.textContent = fmt(to); }, dur + 120);
   step();
 }
 /* 記住上一次的數字，改參數時是「從舊值滑到新值」，不是每次都從 0 重跑 */
@@ -762,6 +772,12 @@ function bindUI() {
     );
   });
   window.addEventListener('resize', () => setTimeout(() => window.__redraw && window.__redraw(), 120));
+  /* 在背景分頁開站時不會有動畫（見 animV 的說明），切回來要把數字與圖補上 */
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !res || !res.ok) return;
+    renderKpis();
+    renderCharts();
+  });
 }
 
 /* ── 由 state 還原 UI ───────────────────────────────── */
