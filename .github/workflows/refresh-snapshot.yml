@@ -1,10 +1,14 @@
 name: refresh offline snapshot
 
-# data/snapshot.json 是「連不上交易所時的離線備援資料」。
-# 它會隨時間越來越舊，所以每月重跑一次，而且只在真的有新資料時才提交。
+# data/snapshot.json（加密貨幣）與 data/us/*.json（美股／ETF）是內建資料：
+# 前者是連不上交易所時的備援，後者是美股主流標的的主力來源，所以每天重跑一次。
+# 只有真的有新資料時才提交。
+#
+# 為什麼 CI 抓得到美股：快照取自 Yahoo Finance，它對瀏覽器沒有 CORS 標頭，
+# 但從伺服器端（這裡）抓完全沒問題。
 on:
   schedule:
-    - cron: "23 3 1 * *"      # 每月 1 日 03:23 UTC（台北 11:23）
+    - cron: "23 3 * * *"      # 每天 03:23 UTC（台北 11:23）
   workflow_dispatch: {}
 
 permissions:
@@ -17,7 +21,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -25,14 +29,21 @@ jobs:
         with:
           node-version: "20"
 
-      - name: 重新抓取備援日線
+      - name: 更新加密貨幣備援資料
         run: node scripts/build-snapshot.mjs
+        continue-on-error: true
+
+      - name: 更新美股／ETF 內建快照
+        run: node scripts/build-us-snapshot.mjs
+
+      - name: 驗證新資料
+        run: node test/us-snapshot.test.mjs
 
       - name: 有變更才提交
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/snapshot.json
+          git add data/
           if git diff --cached --quiet; then
             echo "沒有變更，略過提交"
           else

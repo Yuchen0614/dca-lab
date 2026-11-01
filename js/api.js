@@ -9,6 +9,7 @@
    連不到網路時至少還能跑 BTC / ETH 展示，不會整個白畫面。 */
 
 import { DAY, num } from './util.js';
+import * as US from './api-us.js';
 
 const EP = {
   binance: 'https://api.binance.com',
@@ -18,7 +19,7 @@ const EP = {
 
 /* 資料來源狀態。不能叫 api：app.js 用 `import * as api` 匯入命名空間，
    兩者同名會讓 status.source 讀到 undefined（namespace 上沒有 source 這個鍵）。 */
-export const status = { source: '—', lastError: null, cacheHits: 0, note: null };
+export const status = { source: '—', lastError: null, cacheHits: 0, note: null, splits: [], name: null };
 
 async function jget(url, timeout = 15000) {
   const ac = new AbortController();
@@ -135,16 +136,46 @@ async function cgKlines(symbol, startMs, endMs) {
 }
 
 const SNAP = 'data/snapshot.json';
-export async function fetchKlines(symbol, startMs, endMs) {
-  const key = `k1|${symbol}|${startMs || 0}|${endMs || 0}`;
+const CRYPTO_FROM = Date.UTC(2017, 0, 1);     // Binance 現貨最早的日線從 2017-08 開始
+
+/* ── 統一入口：加密貨幣 / 美股 ETF ──────────────────────
+   兩種市場各自有自己的備援鏈，回傳格式統一成 [{t, c}]。
+   額外的來源資訊（實際來源名稱、還原過的分割、標的全名）放在 status 上，
+   讓畫面可以誠實標示「這筆資料哪來的」。 */
+export async function fetchSeries(asset, symbol) {
+  const key = `s1|${asset}|${symbol}`;
   const hitsBefore = status.cacheHits;
   status.note = null;            // 每次重新評估，避免上一次的提示殘留
+  status.splits = [];
+  status.name = null;
   const got = await cached(key, 10 * 60e3, async () => {
+    if (asset === 'us') {
+      /* 主流標的先用內建快照（建置時從 Yahoo 抓、已驗證），
+         不在清單裡的代號才走 Sina 備援（會自己偵測並還原分割）。 */
+      const tries = [];
+      if (US.isCurated(symbol)) tries.push(['內建快照 · Yahoo', () => US.snapshotDaily(symbol)]);
+      tries.push(['Sina（備援）', () => US.sinaDaily(symbol)]);
+      for (const [name, fn] of tries) {
+        try {
+          const out = await fn();
+          if (out && out.rows && out.rows.length > 20) {
+            status.source = out.src || name;
+            status.splits = out.splits || [];
+            status.name = out.name || US.US_POPULAR_MAP.get(String(symbol).toUpperCase()) || null;
+            status.lastError = null;
+            if (!out.curated) status.note = '此代號不在內建清單，改用 Sina 備援資料（交易日可能偶有缺漏）';
+            return out.rows;
+          }
+          status.lastError = `${name}：沒有資料`;
+        } catch (e) { status.lastError = `${name}：${e.message}`; }
+      }
+      return null;
+    }
     const tries = [
-      ['Binance', () => binanceKlines(EP.binance, symbol, startMs, endMs)],
-      ['Binance Vision', () => binanceKlines(EP.vision, symbol, startMs, endMs)],
-      ['CoinGecko', () => cgKlines(symbol, startMs, endMs)],
-      ['內建快照', async () => snapshot(symbol, startMs, endMs)]
+      ['Binance', () => binanceKlines(EP.binance, symbol, CRYPTO_FROM)],
+      ['Binance Vision', () => binanceKlines(EP.vision, symbol, CRYPTO_FROM)],
+      ['CoinGecko', () => cgKlines(symbol, CRYPTO_FROM)],
+      ['內建快照', async () => snapshot(symbol, CRYPTO_FROM)]
     ];
     for (const [name, fn] of tries) {
       try {

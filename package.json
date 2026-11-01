@@ -5,8 +5,12 @@
   "type": "module",
   "description": "加密貨幣定期定額（DCA）回測實驗室 — 純靜態、零依賴、資料取自交易所公開 API",
   "scripts": {
-    "test": "node test/engine.test.mjs",
+    "test": "node test/engine.test.mjs && node test/xirr-crosscheck.mjs && node test/us-snapshot.test.mjs && node test/stock-data.test.mjs && node test/us-vs-yahoo.test.mjs",
+    "test:engine": "node test/engine.test.mjs",
+    "test:us": "node test/us-snapshot.test.mjs && node test/stock-data.test.mjs",
+    "test:yahoo": "node test/us-vs-yahoo.test.mjs",
     "snapshot": "node scripts/build-snapshot.mjs",
+    "snapshot:us": "node scripts/build-us-snapshot.mjs",
     "serve": "node scripts/serve.mjs"
   }
 }

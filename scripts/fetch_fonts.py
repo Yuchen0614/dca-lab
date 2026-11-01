@@ -53,13 +53,18 @@ def get(url, timeout=180):
         urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout).read()
 
 
+# 不佔字寬的格式字元（零寬空格等）：字型裡本來就沒有對應字形，
+# 放進子集只會被 fontTools 丟掉，然後讓 check_fonts 誤報漏字。
+INVISIBLE = {0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF}
+
+
 def used_chars():
     """原始碼裡所有可能顯示出來的非 ASCII 字元（中文、全形標點、≥ · → 等）。"""
     chars = set("0123456789")
     for name in SCAN:
         with open(os.path.join(BASE, name), encoding="utf-8") as fh:
             for ch in fh.read():
-                if ord(ch) > 0x2000:
+                if ord(ch) > 0x2000 and ord(ch) not in INVISIBLE:
                     chars.add(ch)
     return "".join(sorted(chars))
 

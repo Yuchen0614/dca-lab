@@ -1,8 +1,8 @@
-# DCA LAB · 加密貨幣定期定額回測實驗室
+# DCA LAB · 定期定額回測實驗室
 
-純靜態（零依賴、零建置）的加密貨幣定期定額（DCA）回測工具。設定金額、頻率、期間與手續費，
-用交易所真實日線資料算出年化報酬、最大回撤、波動、夏普等指標，並與單筆投入對照、
-看任意起點的結果分布。
+純靜態（零依賴、零建置）的定期定額（DCA）回測工具，支援**加密貨幣**與**美股／ETF**。
+設定金額、頻率、期間與手續費，用真實日線資料算出年化報酬、最大回撤、波動、夏普等指標，
+並與單筆投入對照、看任意起點的結果分布。
 
 **線上版**：https://yuchen0614.github.io/dca-lab/
 **本機開啟**：`node scripts/serve.mjs` → http://localhost:8123/
@@ -14,11 +14,12 @@
 
 | 設定 | 選項 |
 |---|---|
-| 標的 | Binance 現貨所有 USDT 交易對（依成交額排序、可搜尋） |
+| 市場 | 加密貨幣（Binance 現貨）／美股・ETF（美國掛牌股票與 ETF） |
+| 標的 | 加密貨幣：所有 USDT 交易對（依成交額排序）。美股：30 檔常用標的內建清單＋可搜尋任何代號（支援中英文名稱，如「台積電」→ TSM） |
 | 每期投入 | 任意金額，可切換 USDT / TWD 顯示（以即時匯率換算） |
 | 頻率 | 每日、每週（指定星期）、每兩週、每月（1~28 日或當月最後一天） |
 | 期間 | 任意起訖日，另有「全部／近 5 年／近 3 年／近 1 年」快捷 |
-| 手續費 | 每次買入扣一次，預設 0.1% |
+| 手續費 | 每次買入扣一次；預設加密貨幣 0.1%、美股 0%（券商多為零手續費） |
 | 跌價加碼（選用） | 相對「上次買入價」或「歷史最高價」每下跌 N%，該期投入乘上倍數（有上限） |
 
 ### 指標
@@ -46,15 +47,45 @@
 
 ## 資料來源與容錯
 
-四個層級依序嘗試，任一層成功就用它，畫面上會標示實際來源：
+任一層成功就用它，畫面上會標示實際來源（含還原過的股票分割）。
+
+**加密貨幣**，四個層級依序嘗試：
 
 1. `api.binance.com` — Binance 現貨公開 K 線（不用 API key）
 2. `data-api.binance.vision` — Binance 官方公開資料節點（地區被擋時的替代入口）
 3. `api.coingecko.com` — CoinGecko 公開行情（**只提供近 365 天**，若期間被縮短會在畫面明確提示）
-4. `data/snapshot.json` — 站內打包的 10 檔主流幣完整日線，連不上任何來源時仍能操作
+4. `data/snapshot.json` — 站內打包的 10 檔主流幣完整日線
 
-實測過的取捨：**Bybit 與 OKX 的公開端點不回 `Access-Control-Allow-Origin`**，
-瀏覽器端讀不到，所以不列入（詳見 `js/api.js` 檔頭）。
+**美股／ETF**：
+
+1. `data/us/<TICKER>.json` — 主流標的的內建快照，建置時從 Yahoo Finance 抓取
+2. Sina 的公開 JSONP 端點 — 任何代號都能查的備援（會自己偵測並還原股票分割）
+
+### 為什麼要自己做分割還原
+
+來源的原始美股日線**沒有還原股票分割**。SOXL 在 2015-05-20（4:1）與 2021-03-02（15:1）
+的資料會出現 145.84 → 36.65、638.37 → 38.55 這種假暴跌；直接拿去回測，
+會把「分割」當成「腰斬再腰斬」。同樣的資料跑出來總報酬是 +92.6%，
+正確還原後是 +3890.6% —— **差了 3798 個百分點**。
+
+偵測方式：分割生效日的開盤價必定約等於「前一日收盤 ÷ 比例」，
+用這個比值去比對常見分割比例（整數比例容差 10%，是量出來的不是猜的），
+再加上「鄰近日不得暴走」的條件，避免把 GME 2021-01-29（單日 +68%、前兩天各 +130%）
+這種軋空行情誤判成分割。門檻的實測依據在 `test/probe-split.mjs`。
+
+### 為什麼主流標的不用 Sina
+
+實測發現 Sina 的原始資料有三種瑕疵，所以只當備援：
+
+- **偶爾漏掉交易日**：例如 MSFT／TSM 少了 2014-07-16，把當天收盤掛在前一天
+- **少數列重複貼上**：NVDA 2009-09-17/18 三天同一組 OHLC（會被誤判成 2 倍基準切換）
+- **2006 年之前有未標示的基準調整**：例如 MSFT 2003-02、AAPL 2005-02 的分割在舊區塊已內建，
+  跨過該邊界的回測會差一個倍數 → 因此美股資料自 **2006 年**起提供
+
+其他候選來源也實測過：Yahoo 對瀏覽器沒有 `Access-Control-Allow-Origin`；
+Stooq 有 JS 防護且無 ACAO；Nasdaq／twelvedata／eodhd／Alpha Vantage 都要 API key；
+免費 CORS 代理（allorigins／corsproxy／codetabs／thingproxy／corsfix）全數失效或需金鑰；
+Tencent 的美股 K 線只回當日一根。
 
 ---
 
@@ -71,24 +102,36 @@ js/dca.js                 回測引擎：買入排程、逐日淨值、年度彙
 js/api.js                 資料層：四層備援 + 快取
 js/charts.js              自繪 Canvas 圖表（無外部圖表庫）
 js/app.js                 狀態、控制、渲染、匯出
-data/snapshot.json        離線備援資料
+js/api-us.js              美股資料層：分割偵測與還原、Sina 備援、搜尋建議
+data/snapshot.json        加密貨幣離線備援資料
+data/us/*.json            美股／ETF 內建快照（30 檔，建置時抓取、已驗證）
 scripts/serve.mjs         本機靜態伺服器
-scripts/build-snapshot.mjs 重新產生 data/snapshot.json
+scripts/build-snapshot.mjs     重新產生加密貨幣備援資料
+scripts/build-us-snapshot.mjs  重新產生美股快照（來源 Yahoo Finance）
 scripts/fetch_fonts.py    產生字型（含中文子集）
 scripts/check_fonts.py    檢查中文字型有沒有漏字
 test/engine.test.mjs      引擎驗證（合成資料 + 真實資料獨立重算）
 test/xirr-crosscheck.mjs  XIRR 用第二種演算法交叉驗證
+test/us-snapshot.test.mjs 美股快照：完整性、殘留跳空、關鍵價格、交叉比對
+test/stock-data.test.mjs  美股備援路徑：分割偵測門檻、資料清理、兩條路徑一致性
+test/us-vs-yahoo.test.mjs 以 Yahoo 官方資料為基準驗證（含分割事件逐筆比對）
+test/probe-split.mjs      調查工具：印出分割判定門檻的實測數據
+test/probe-us.mjs         調查工具：印出任一標的的原始資料與分割事件
 ```
 
 ## 開發指令
 
 ```bash
-node scripts/serve.mjs              # 本機開站
-node test/engine.test.mjs           # 引擎測試（會連 Binance 抓真實資料）
-node test/xirr-crosscheck.mjs       # XIRR 交叉驗證
-node scripts/build-snapshot.mjs     # 更新離線備援資料
-python scripts/fetch_fonts.py       # 重新產生字型（改動介面文字後要跑）
-python scripts/check_fonts.py       # 確認沒有中文字漏出字型子集
+node scripts/serve.mjs                    # 本機開站
+npm test                                  # 全部測試（會連網抓真實資料）
+node test/engine.test.mjs                 # 引擎測試
+node test/us-snapshot.test.mjs            # 美股快照驗證
+node test/us-vs-yahoo.test.mjs            # 以 Yahoo 為基準的資料驗證
+node scripts/build-snapshot.mjs           # 更新加密貨幣備援資料
+node scripts/build-us-snapshot.mjs        # 更新美股快照
+node scripts/build-us-snapshot.mjs SOXL TQQQ   # 只更新指定標的
+python scripts/fetch_fonts.py             # 重新產生字型（改動介面文字後要跑）
+python scripts/check_fonts.py             # 確認沒有中文字漏出字型子集
 ```
 
 ## 驗證狀態
@@ -97,11 +140,26 @@ python scripts/check_fonts.py       # 確認沒有中文字漏出字型子集
   （例如最大回撤用逐步追蹤重算、月勝率用正的月數重算、滾動樣本用日期區間重算）。
 - `test/xirr-crosscheck.mjs`：二分法與 Newton-Raphson 兩種解法收斂到同一個根，
   NPV 殘差相對投入量級約 5×10⁻¹¹。
-- 已驗證：線上載入、四層備援（正常／擋 Binance／只留快照）、幣別切換、四種頻率、
-  兩種滾動模式、換幣種、CSV 匯出、桌機與手機版面、無 Console 錯誤。
+- `test/us-snapshot.test.mjs`：70 項全過（30 檔逐檔檢查殘留跳空、14 個關鍵日期價格、
+  7 檔的分割邊界連續性、14 檔與第二來源逐日比對）。
+- `test/stock-data.test.mjs`：27 項全過。Sina 備援路徑與內建快照對 SOXL 的結論一致
+  （4186 天中位數偏差 0.0000%、總報酬同為 +3890.6%）。
+- `test/us-vs-yahoo.test.mjs`：以 Yahoo 為基準，19 檔標的在 2006 年後每一天的比值誤差 < 2%。
+- 已驗證：線上載入、加密貨幣四層備援（正常／擋 Binance／只留快照）、美股雙來源、
+  幣別切換、四種頻率、兩種滾動模式、換標的、中英文搜尋、CSV 匯出、桌機與手機版面、
+  無 Console 錯誤。
 
 ## 已知限制
 
+- **股利未計入**：美股與 ETF 使用價格序列，除息造成的價格下跌會反映在報酬裡，
+  但收到的股利現金沒有計入（未假設股利再投入）。3 倍槓桿 ETF 的配息通常不大，
+  但長期累積仍有 1~2%/年的量級差異。
+- **美股資料自 2006 年起**：更早的區間在來源端有未標示的基準調整（見上文）。
+- 不在內建清單的個股走 Sina 備援，可能有個別交易日缺漏或單日價格異常；
+  畫面上的資料來源會標示「Sina（備援）」。要新增內建標的：改 `js/api-us.js` 的
+  `US_POPULAR` 再跑 `node scripts/build-us-snapshot.mjs`。
+- 罕見的分數分割（3:2、5:4）不自動偵測：放寬容差會把 −25%~−33% 的單日暴跌誤判成分割，
+  而 2006 年後的主流標的沒有這種分割。真的遇到會以「殘留跳檔」的形式出現在價格圖上。
 - CoinGecko 備援只覆蓋近一年；更早的期間需要 Binance 可連線或該幣在 `data/snapshot.json` 內。
 - 加碼規則不參與滾動回測（避免不同起點的基準不一致）。
 - 只做買進回測，沒有賣出、再平衡、稅務與匯率變動。

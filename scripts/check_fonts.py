@@ -12,7 +12,7 @@ from fontTools.ttLib import TTFont
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE, "scripts"))
-from fetch_fonts import SCAN  # noqa: E402  （共用同一份掃描清單，避免兩邊不同步）
+from fetch_fonts import SCAN, INVISIBLE  # noqa: E402  （共用同一份掃描清單與例外清單）
 
 FONT = os.path.join(BASE, "assets", "fonts", "NotoSansTC.woff2")
 
@@ -22,7 +22,7 @@ def used():
     for name in SCAN:
         with open(os.path.join(BASE, name), encoding="utf-8") as fh:
             for ch in fh.read():
-                if ord(ch) > 0x2000:
+                if ord(ch) > 0x2000 and ord(ch) not in INVISIBLE:
                     chars.add(ch)
     return chars
 

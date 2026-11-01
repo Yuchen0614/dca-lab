@@ -5,6 +5,7 @@
 import * as api from './api.js';
 import * as dca from './dca.js';
 import * as U from './util.js';
+import * as US from './api-us.js';
 import { mount } from './charts.js';
 
 const $ = (s) => document.querySelector(s);
@@ -15,11 +16,15 @@ const PAL = { cy: '#5b8dff', up: '#0ecb81', down: '#f6465d', am: '#f0b90b', mg: 
 const TOP_CHIPS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'SUIUSDT', 'LINKUSDT'];
 
 const state = {
-  sym: 'BTCUSDT', amt: 300, cur: 'USD', fee: 0.1, freq: 'monthly', weekday: 1, monthDay: 1,
+  asset: 'crypto',                                   // crypto | us
+  sym: 'BTCUSDT', symMem: { crypto: 'BTCUSDT', us: 'SOXL' },
+  amt: 300, cur: 'USD', fee: 0.1, freq: 'monthly', weekday: 1, monthDay: 1,
   range: 'all', start: null, end: null,
   boost: { on: false, mode: 'last', dropPct: 10, mult: 2, cap: 4 },
   rollMode: 'fixed', rollP: 24
 };
+/* 預設手續費：加密貨幣交易所現貨 0.1%，美股券商多半零手續費 */
+const FEE_DEFAULT = { crypto: 0.1, us: 0 };
 
 let allCandles = [];
 let fx = 32, fxReady = false;
@@ -48,6 +53,10 @@ const axPrice = (v) => (Math.abs(v) >= 1000 ? U.fmt(v, 0) : U.fmtPrice(v));
 const pct = (v, dp = 2) => U.fmtPct(v, dp);
 const cls = (v, flip) => (isFinite(v) ? (v === 0 ? 'flat' : (flip ? v < 0 : v > 0) ? 'up' : 'down') : 'flat');
 const iso = U.isoDay;
+const isUs = () => state.asset === 'us';
+/* 加密貨幣的代號是 BTCUSDT 這種交易對，顯示時要拆成 BTC/​USDT；美股就是純代號 */
+const symLabel = () => (isUs() ? state.sym : String(state.sym).replace(/USDT$/, ''));
+const unitWord = () => (isUs() ? '股' : symLabel());
 
 /* ── 狀態列 ─────────────────────────────────────────── */
 function setStatus(kind, txt) {
@@ -75,14 +84,23 @@ function infoNote(txt) {
   noteTimer = setTimeout(() => { if ($('#statusTxt').textContent === txt) setStatus(null); }, 8000);
 }
 
-/* ── 幣種選單 ───────────────────────────────────────── */
+/* ── 標的選單（兩種市場各自不同）─────────────────────── */
+function symRow(id, name, right, sub, on) {
+  return `<div class="symrow${on ? ' on' : ''}" data-sym="${id}" role="option">
+    <span class="s1"><b>${id}</b><i>${sub || ''}</i></span>
+    <span class="s2">${right || ''}</span>
+    <span class="s3">${name || ''}</span></div>`;
+}
+function bindSymRows() {
+  $('#symList').querySelectorAll('.symrow').forEach(r => r.addEventListener('click', () => selectSymbol(r.dataset.sym)));
+}
+
 function renderSymMenu(q = '') {
+  if (isUs()) return renderUsMenu(q);
   const list = $('#symList');
   const query = q.trim().toUpperCase();
-  let rows = universe;
-  if (query) rows = universe.filter(u => u.base.includes(query) || u.symbol.includes(query));
-  else rows = universe.slice(0, 80);
-  if (query) rows = rows.slice(0, 80);
+  let rows = query ? universe.filter(u => u.base.includes(query) || u.symbol.includes(query)) : universe;
+  rows = rows.slice(0, 80);
   const html = rows.map(u => `
     <div class="symrow${u.symbol === state.sym ? ' on' : ''}" data-sym="${u.symbol}" role="option">
       <span class="s1"><b>${u.base}</b><i>USDT</i></span>
@@ -92,7 +110,41 @@ function renderSymMenu(q = '') {
   const direct = query && /^[A-Z0-9]{2,10}$/.test(query) && !universe.some(u => u.symbol === query + 'USDT' || u.symbol === query)
     ? `<div class="symrow" data-sym="${query.endsWith('USDT') ? query : query + 'USDT'}"><span class="s1"><b>${query.replace(/USDT$/, '')}</b><i>USDT · 直接查詢</i></span><span class="s2"></span><span class="s3"></span></div>` : '';
   list.innerHTML = (direct + html) || '<div class="empty">沒有符合的幣種</div>';
-  list.querySelectorAll('.symrow').forEach(r => r.addEventListener('click', () => selectSymbol(r.dataset.sym)));
+  bindSymRows();
+}
+
+/* 美股：內建清單直接列；輸入文字則向 Sina 的建議介面查（支援中英文名稱，例如打「特斯拉」） */
+let sugTimer = null, sugSeq = 0;
+function renderUsMenu(q = '') {
+  const list = $('#symList');
+  const query = q.trim().toUpperCase();
+  if (!query) {
+    const html = US.US_POPULAR.map(([t, n]) => symRow(t, '', '', n, t === state.sym)).join('');
+    list.innerHTML = html;
+    bindSymRows();
+    return;
+  }
+  const local = US.US_POPULAR.filter(([t, n]) => t.includes(query) || n.toUpperCase().includes(query));
+  const direct = /^[A-Z][A-Z0-9.\-]{0,6}$/.test(query) ? symRow(query, '', '', '直接查詢', query === state.sym) : '';
+  list.innerHTML = (direct + (local.length ? local.map(([t, n]) => symRow(t, '', '', n, t === state.sym)).join('') : '<div class="empty">查詢中…</div>'));
+  bindSymRows();
+  /* 遠端建議（取消上一次，避免回來的順序亂掉） */
+  const my = ++sugSeq;
+  clearTimeout(sugTimer);
+  sugTimer = setTimeout(async () => {
+    try {
+      const hits = await US.sinaSuggest(q.trim());
+      if (my !== sugSeq) return;
+      const seen = new Set(local.map(x => x[0]));
+      const extra = hits.filter(h => !seen.has(h.ticker)).slice(0, 40)
+        .map(h => symRow(h.ticker, '', '', h.name, h.ticker === state.sym)).join('');
+      if (extra) list.innerHTML = direct + extra + local.map(([t, n]) => symRow(t, '', '', n, t === state.sym)).join('');
+      else if (!direct && !local.length) list.innerHTML = '<div class="empty">沒有符合的標的</div>';
+      bindSymRows();
+    } catch (e) {
+      if (my === sugSeq && !local.length && !direct) list.innerHTML = '<div class="empty">查詢失敗，可直接輸入代號後按 Enter</div>';
+    }
+  }, 260);
 }
 
 function openSymMenu(open) {
@@ -101,30 +153,72 @@ function openSymMenu(open) {
   $('#symBtn').setAttribute('aria-expanded', String(!!open));
   if (open) { $('#symSearch').value = ''; renderSymMenu(''); $('#symSearch').focus(); }
 }
+/* 快速標籤：加密貨幣取成交額前幾名，美股取內建清單前幾檔 */
+function renderChips() {
+  const html = isUs()
+    ? US.US_POPULAR.slice(0, 8).map(([t]) => `<button data-sym="${t}" class="${t === state.sym ? 'on' : ''}">${t}</button>`).join('')
+    : TOP_CHIPS.map(s => `<button data-sym="${s}" class="${s === state.sym ? 'on' : ''}">${s.replace('USDT', '')}</button>`).join('');
+  $('#symChips').innerHTML = html;
+}
+function paintSym() {
+  $('#symBase').textContent = symLabel();
+  $('#symQuote').textContent = isUs() ? '' : '/USDT';
+  $('#symQuote').hidden = isUs();
+  renderChips();
+}
 function selectSymbol(sym) {
   openSymMenu(false);
+  sym = isUs() ? String(sym).toUpperCase() : sym;
   if (sym === state.sym && allCandles.length) return;
   state.sym = sym;
-  $('#symBase').textContent = sym.replace(/USDT$/, '');
-  $('#symChips').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.sym === sym));
+  state.symMem[state.asset] = sym;
+  paintSym();
   syncUrl();
   loadSymbol(sym);
+}
+
+/* 切換市場：各自記住上次選的標的，期間與頻率設定沿用 */
+function setAsset(asset, keepRange = false) {
+  if (asset === state.asset) return;
+  state.symMem[state.asset] = state.sym;
+  state.asset = asset;
+  state.sym = state.symMem[asset] || (asset === 'us' ? 'SOXL' : 'BTCUSDT');
+  state.fee = FEE_DEFAULT[asset];
+  $('#fee').value = state.fee;
+  if (!keepRange) { state.range = 'all'; state.start = null; state.end = null; }
+  $$('#assetSeg button').forEach(b => b.classList.toggle('on', b.dataset.asset === asset));
+  paintSym();
+  syncUrl();
+  allCandles = [];
+  setSource('wait', '', '載入中');
+  /* 首次切到加密貨幣時才去抓全市場清單 */
+  if (asset === 'crypto' && !universe.length) {
+    api.fetchUniverse().then(l => { universe = l || []; });
+  }
+  loadSymbol(state.sym);
 }
 
 /* ── 載入資料 ───────────────────────────────────────── */
 async function loadSymbol(sym) {
   loading = true; lastErr = null;
-  setStatus('loading', `載入 ${sym.replace(/USDT$/, '')} 日線資料…`);
+  setStatus('loading', `載入 ${isUs() ? sym : sym.replace(/USDT$/, '')} 日線資料…`);
   setSource('wait', '', '連線中');
   try {
-    const rows = await api.fetchKlines(sym, Date.UTC(2017, 0, 1));
-    if (!rows || rows.length < 3) throw new Error('沒有可用的歷史資料');
+    const rows = await api.fetchSeries(state.asset, sym);
+    if (!rows || rows.length < 3) {
+      throw new Error(isUs() ? '查不到這個代號的日線（請確認是美國掛牌的股票或 ETF 代號）' : '沒有可用的歷史資料');
+    }
     allCandles = rows;
     partial = rows[rows.length - 1].t + DAY > Date.now();
     setSource('ok', api.status.source, `${rows.length} 根日線`);
     setStatus(null);
-    /* 備援來源可能只提供比使用者要求更短的期間，這種事一定要說，不能默默換掉 */
+    /* 備援來源可能只提供比使用者要求更短的期間、或還原了分割，這些都要說清楚 */
     if (api.status.note) infoNote(api.status.note);
+    if (api.status.splits && api.status.splits.length) {
+      const txt = api.status.splits
+        .map(s => `${s.date} ${s.factor >= 1 ? s.factor + ':1' : '1:' + Math.round(1 / s.factor)}`).join('、');
+      infoNote(`已還原 ${api.status.splits.length} 次股票分割：${txt}`);
+    }
     if (!state.start || !state.end || state.range === 'all') {
       state.start = iso(rows[0].t);
       state.end = iso(rows[rows.length - 1].t);
@@ -180,7 +274,7 @@ function compute() {
 
   const candles = dca.sliceRange(allCandles, start, end + DAY - 1);
   if (candles.length < 3) {
-    setStatus('err', `${state.sym.replace(/USDT$/, '')} 在這個期間沒有資料（該幣種可能還沒上市）`);
+    setStatus('err', `${symLabel()} 在這個期間沒有資料（${isUs() ? '該標的可能還沒上市' : '該幣種可能還沒上市'}）`);
     res = null; roll = null; renderAll(); return;
   }
   res = dca.runBacktest(candles, cfg);
@@ -267,7 +361,7 @@ function renderKpis() {
   const s = res.sum;
   const html = [
     kpiCard('總投入', money(s.invested), `${s.periods} 期 · 每期 ${money(s.invested / (s.periods || 1))}`, '', 'money', s.invested),
-    kpiCard('期末市值', money(s.finalValue), `${U.fmtQty(s.totalCoins)} ${state.sym.replace(/USDT$/, '')}`, '', 'money', s.finalValue),
+    kpiCard('期末市值', money(s.finalValue), `${U.fmtQty(s.totalCoins)} ${isUs() ? '股' : symLabel()}`, '', 'money', s.finalValue),
     kpiCard('累積損益', money(s.totalPnl), `總報酬 <b>${pct(s.totalRet)}</b>`, cls(s.totalPnl), 'money', s.totalPnl),
     kpiCard('年化報酬 XIRR', pct(s.xirr), `時間加權 <b>${pct(s.twr)}</b>`, cls(s.xirr), 'pct2', s.xirr),
     kpiCard('最大回撤', pct(s.maxDD), `${iso(s.ddPeak).slice(2)}→${iso(s.ddTrough).slice(2)} · ${s.ddDays} 天`, 'down', 'pct1', s.maxDD),
@@ -336,7 +430,7 @@ function renderCharts() {
         ['累計投入', money(res.invest[i])],
         ['損益', money(res.value[i] - res.invest[i]), cls(p)],
         ['報酬率', pct(p), cls(p)],
-        ['持幣', U.fmtQty(res.coins[i]) + ' ' + state.sym.replace(/USDT$/, '')]
+        [isUs() ? '持股' : '持幣', U.fmtQty(res.coins[i]) + ' ' + (isUs() ? '股' : symLabel())]
       ], iso(T[i]) + `　第 ${i + 1} / ${n} 天`);
     }
   });
@@ -553,9 +647,9 @@ function renderHeat() {
 function renderMetrics() {
   const g = $('#metricGrid');
   if (!res || !res.ok) { g.innerHTML = ''; return; }
-  const s = res.sum, curSym = state.sym.replace(/USDT$/, '');
+  const s = res.sum, curSym = symLabel();
   const items = [
-    ['平均成本', price(s.avgCost), `買入 ${U.fmtQty(s.totalCoins)} ${curSym}`],
+    ['平均成本', price(s.avgCost), `買入 ${U.fmtQty(s.totalCoins)} ${isUs() ? '股' : curSym}`],
     ['期間平均價', price(s.periodAvgPrice), '每日收盤均價（未加權）'],
     ['成本優勢', pct(s.costEdge), '平均成本低於期間均價的幅度', cls(s.costEdge)],
     ['期末價格', price(s.finalPrice), `起點 ${price(s.priceFrom)}`],
@@ -564,7 +658,7 @@ function renderMetrics() {
     ['年化報酬 XIRR', pct(s.xirr), '資金加權（正確處理分批投入）', cls(s.xirr)],
     ['時間加權年化', pct(s.twr), '單位成本淨值的年化成長'],
     ['簡單年化', pct(s.cagr), '（市值／投入）年化，參考值'],
-    ['年化波動', pct(s.annVol, 1), `下行波動 ${pct(s.downside, 1)}`],
+    ['年化波動', pct(s.annVol, 1, false), `下行波動 ${pct(s.downside, 1, false)}`],
     ['夏普值', U.fmt(s.sharpe, 2), '無風險利率 0%'],
     ['索提諾', U.fmt(s.sortino, 2), '只計下行風險'],
     ['卡瑪比率', U.fmt(s.calmar, 2), '年化報酬 ÷ 最大回撤'],
@@ -578,6 +672,14 @@ function renderMetrics() {
     ['標的價格最大回撤', pct(s.priceMaxDD, 1), '同期價格本身', 'down']
   ];
   if (s.boostBuys > 0) items.push(['加碼次數', `${s.boostBuys} 期`, `額外投入 ${money(s.boostExtra)}`, 'am']);
+  /* 資料出處要留在畫面上：回測數字能追溯到來源，才有辦法判斷可不可信 */
+  if (api.status.source && api.status.source !== '—') {
+    items.push(['資料來源', api.status.source, api.status.name || (isUs() ? '' : '交易所公開日線')]);
+  }
+  if (api.status.splits && api.status.splits.length) {
+    items.push(['已還原股票分割', `${api.status.splits.length} 次`,
+      api.status.splits.map(x => `${x.date} ${x.factor >= 1 ? x.factor + ':1' : '1:' + Math.round(1 / x.factor)}`).join('、')]);
+  }
   g.innerHTML = items.map(([l, v, sub, c]) => `<div class="metric"><label>${l}</label><b class="${c || ''}">${v}</b><i>${sub || ''}</i></div>`).join('');
 }
 
@@ -640,7 +742,7 @@ function exportNav() {
    ══════════════════════════════════════════════════════════ */
 function syncUrl() {
   const p = new URLSearchParams({
-    s: state.sym, a: String(state.amt), c: state.cur, f: String(state.fee), q: state.freq,
+    as: state.asset, s: state.sym, a: String(state.amt), c: state.cur, f: String(state.fee), q: state.freq,
     w: String(state.weekday), m: String(state.monthDay),
     f0: state.start || '', f1: state.end || '', rg: state.range || '',
     bo: state.boost.on ? '1' : '0', bm: state.boost.mode, bd: String(state.boost.dropPct),
@@ -653,7 +755,9 @@ function fromUrl() {
   if (!location.hash.length) return;
   const p = new URLSearchParams(location.hash.slice(1));
   const g = (k, d) => (p.has(k) ? p.get(k) : d);
+  state.asset = g('as', 'crypto') === 'us' ? 'us' : 'crypto';
   state.sym = g('s', state.sym);
+  state.symMem[state.asset] = state.sym;
   state.amt = U.num(g('a', state.amt)) || state.amt;
   state.cur = g('c', state.cur);
   state.fee = U.num(g('f', state.fee));
@@ -676,7 +780,12 @@ let debounce = null;
 const later = (fn, ms = 220) => { clearTimeout(debounce); debounce = setTimeout(fn, ms); };
 
 function bindUI() {
-  /* 幣種 */
+  /* 市場：加密貨幣 / 美股 ETF */
+  $('#assetSeg').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    setAsset(b.dataset.asset);
+  });
+  /* 標的 */
   $('#symBtn').addEventListener('click', (e) => { e.stopPropagation(); openSymMenu($('#symMenu').hidden); });
   $('#symSearch').addEventListener('input', (e) => renderSymMenu(e.target.value));
   $('#symSearch').addEventListener('keydown', (e) => {
@@ -687,7 +796,6 @@ function bindUI() {
     if (!e.target.closest('.sym-field')) openSymMenu(false);
     if (!e.target.closest('#advBox')) $('#advBox').open = false;
   });
-  $('#symChips').innerHTML = TOP_CHIPS.map(s => `<button data-sym="${s}" class="${s === state.sym ? 'on' : ''}">${s.replace('USDT', '')}</button>`).join('');
   $('#symChips').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) selectSymbol(b.dataset.sym); });
 
   /* 金額 / 幣別 */
@@ -782,8 +890,8 @@ function bindUI() {
 
 /* ── 由 state 還原 UI ───────────────────────────────── */
 function syncUIFromState() {
-  $('#symBase').textContent = state.sym.replace(/USDT$/, '');
-  $('#symChips').innerHTML = TOP_CHIPS.map(s => `<button data-sym="${s}" class="${s === state.sym ? 'on' : ''}">${s.replace('USDT', '')}</button>`).join('');
+  $$('#assetSeg button').forEach(b => b.classList.toggle('on', b.dataset.asset === state.asset));
+  paintSym();
   $('#amt').value = state.amt;
   $('#curBtn').textContent = state.cur === 'TWD' ? 'TWD' : 'USDT';
   $('#fee').value = state.fee;
@@ -814,11 +922,13 @@ async function boot() {
     if (isFinite(v) && v > 5) { fx = v; fxReady = true; }
     $('#fxPill').textContent = `1 USDT = ${U.fmt(fx, 2)} TWD`;
   });
-  api.fetchUniverse().then(list => {
-    universe = list || [];
-    renderSymMenu('');
-    setSource('ok', api.status.source, `${allCandles.length} 根日線`);
-  });
+  /* 加密貨幣才需要全市場清單：美股模式不該白抓一次 Binance 的 ticker */
+  if (!isUs()) {
+    api.fetchUniverse().then(list => {
+      universe = list || [];
+      if (universe.length && allCandles.length) setSource('ok', api.status.source, `${allCandles.length} 根日線`);
+    });
+  }
   await loadSymbol(state.sym);
   /* 除錯／自動化用的把手：可以在 Console 直接看引擎結果，也方便外部驗證匯出內容 */
   window.DCALAB = {

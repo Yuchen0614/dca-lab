@@ -27,10 +27,18 @@
 
 <!-- ── 控制列 ─────────────────────────────────────────── -->
 <section class="deck" aria-label="回測設定">
+  <div class="field market-field">
+    <label>市場</label>
+    <div class="seg" id="assetSeg" role="tablist">
+      <button data-asset="crypto" class="on">加密貨幣</button>
+      <button data-asset="us">美股・ETF</button>
+    </div>
+  </div>
+
   <div class="field sym-field">
     <label>標的</label>
     <button class="symbtn" id="symBtn" aria-haspopup="listbox" aria-expanded="false">
-      <span class="symbase" id="symBase">BTC</span><span class="symquote">/USDT</span>
+      <span class="symbase" id="symBase">BTC</span><span class="symquote" id="symQuote">/USDT</span>
       <svg viewBox="0 0 10 6" width="9" height="9" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
     </button>
     <div class="symmenu" id="symMenu" role="listbox" hidden>
@@ -75,6 +83,11 @@
     </select>
   </div>
 
+  <div class="field narrow">
+    <label>手續費 %</label>
+    <input id="fee" type="text" inputmode="decimal" value="0.1" autocomplete="off">
+  </div>
+
   <div class="field wide">
     <label>期間</label>
     <div class="rangebox">
@@ -86,11 +99,6 @@
       <button data-days="1095">近 3 年</button>
       <button data-days="365">近 1 年</button>
     </div>
-  </div>
-
-  <div class="field narrow">
-    <label>手續費 %</label>
-    <input id="fee" type="text" inputmode="decimal" value="0.1" autocomplete="off">
   </div>
 
   <details class="adv" id="advBox">
@@ -207,7 +215,10 @@
     <summary>回測方法與假設</summary>
     <div class="mbody">
       <ul>
-        <li><b>資料</b>：交易所公開日線（Binance 現貨，備援 data-api.binance.vision 與 CoinGecko），每根 K 線為 UTC 00:00 開盤，買入價採<b>當日收盤價</b>。</li>
+        <li><b>加密貨幣資料</b>：交易所公開日線（Binance 現貨，備援 data-api.binance.vision 與 CoinGecko），每根 K 線為 UTC 00:00 開盤，買入價採<b>當日收盤價</b>。</li>
+        <li><b>美股・ETF 資料</b>：主流標的取自內建快照（建置時抓取，<b>已還原股票分割</b>，交易日完整），其他代號則走 Sina 公開介面，會自動偵測並還原分割（分割事件會列在「完整指標」裡供檢視）。美股資料自 <b>2006 年</b>起提供。</li>
+        <li><b>分割還原</b>：未還原分割的價格序列會把「4:1 分割」誤判成「單日 −75%」。偵測方式是比對「前一日收盤 ÷ 當日開盤」是否等於常見分割比例，並排除鄰近日暴走的行情（例如軋空）。</li>
+        <li><b>股利未計入</b>：美股與 ETF 使用價格序列，除息造成的價格下跌會反映在報酬裡，但收到的股利現金沒有計入（未假設股利再投入）。</li>
         <li><b>扣款日</b>：每月／每週的指定日若沒有資料或當期幣種尚未上市，順延至下一個有資料的日子；指定日早於起始日則該期不扣款。</li>
         <li><b>手續費</b>：每次買入以「投入金額 × 手續費率」扣除，因此買到的幣數量＝金額 ×（1−費率）÷ 價格。</li>
         <li><b>年化報酬</b>：採 XIRR（資金加權內部報酬率）。定期定額的資金是分批進場的，簡單年化會高估或低估；「簡單年化」僅列為參考。</li>
