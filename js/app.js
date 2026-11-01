@@ -77,6 +77,26 @@ function setSource(state2, name, detail) {
   $('#srcTxt').textContent = detail || name || '';
 }
 
+/* 載入中要讓使用者看得到「在等什麼」：來源名稱 + 已經幾秒 + 哪些已經失敗。
+   之前只有一句「載入 X 日線資料…」轉圈，慢的時候完全無從判斷卡在哪。 */
+let loadTick = null, loadStart = 0, loadLabel = '';
+function startLoading(txt) {
+  loadLabel = txt; loadStart = Date.now();
+  setStatus('loading', txt);
+  clearInterval(loadTick);
+  loadTick = setInterval(() => {
+    const sec = Math.round((Date.now() - loadStart) / 1000);
+    const parts = [];
+    if (api.status.trying) parts.push(`正在試 ${api.status.trying}`);
+    if (api.status.tries && api.status.tries.length) {
+      parts.push(api.status.tries.map(t => `${t.name} ${(t.ms / 1000).toFixed(1)}s ${t.ok ? '✓' : '✗'}`).join('、'));
+    }
+    $('#statusTxt').textContent = `${txt} ${sec}s` + (parts.length ? `（${parts.join('；')}）` : '');
+  }, 500);
+}
+function stopLoading() { clearInterval(loadTick); loadTick = null; }
+function setRetry(on) { const b = $('#retryBtn'); if (b) b.hidden = !on; }
+
 /* 一次性提示（例如備援來源只提供較短的歷史）：顯示幾秒後自己收起來，
    不做常駐提醒——使用者在跑回測時不需要一直看到說明文字。 */
 let noteTimer = null;
@@ -149,11 +169,26 @@ function renderUsMenu(q = '') {
   }, 260);
 }
 
+/* 全市場清單（exchangeInfo 約 1.5MB ＋ 24hr ticker 約 2.5MB）只在打開選單時才抓，
+   不要放在開站流程裡：慢速網路下那 4MB 會佔滿連線，把真正要等的日線資料擠到後面。 */
+async function ensureUniverse() {
+  if (universe.length || isUs()) return;
+  $('#symList').innerHTML = '<div class="empty">載入市場清單…</div>';
+  const list = await api.fetchUniverse();
+  universe = list || [];
+  if (!universe.length) { $('#symList').innerHTML = '<div class="empty">市場清單載入失敗，可直接輸入幣種代號</div>'; return; }
+  if (!$('#symMenu').hidden) renderSymMenu($('#symSearch').value || '');
+}
 function openSymMenu(open) {
   const m = $('#symMenu');
   m.hidden = !open;
   $('#symBtn').setAttribute('aria-expanded', String(!!open));
-  if (open) { $('#symSearch').value = ''; renderSymMenu(''); $('#symSearch').focus(); }
+  if (open) {
+    $('#symSearch').value = '';
+    renderSymMenu('');
+    $('#symSearch').focus();
+    if (!isUs() && !universe.length) ensureUniverse();
+  }
 }
 /* 快速標籤：加密貨幣取成交額前幾名，美股取內建清單前幾檔 */
 function renderChips() {
@@ -194,24 +229,26 @@ function setAsset(asset, keepRange = false) {
   allCandles = [];
   setSource('wait', '', '載入中');
   /* 首次切到加密貨幣時才去抓全市場清單 */
-  if (asset === 'crypto' && !universe.length) {
-    api.fetchUniverse().then(l => { universe = l || []; });
-  }
   loadSymbol(state.sym);
 }
 
 /* ── 載入資料 ───────────────────────────────────────── */
+let loadSeq = 0;
 async function loadSymbol(sym) {
+  const seq = ++loadSeq;
   loading = true; lastErr = null;
-  setStatus('loading', `載入 ${isUs() ? sym : sym.replace(/USDT$/, '')} 日線資料…`);
+  setRetry(false);
+  startLoading(`載入 ${isUs() ? sym : sym.replace(/USDT$/, '')} 日線資料…`);
   setSource('wait', '', '連線中');
   try {
     const rows = await api.fetchSeries(state.asset, sym);
+    if (seq !== loadSeq) return;                 // 使用者已經切到別的標的，這筆結果作廢
     if (!rows || rows.length < 3) {
       throw new Error(isUs() ? '查不到這個代號的日線（請確認是美國掛牌的股票或 ETF 代號）' : '沒有可用的歷史資料');
     }
     allCandles = rows;
     partial = rows[rows.length - 1].t + DAY > Date.now();
+    stopLoading();
     setSource('ok', api.status.source, `${rows.length} 根日線`);
     setStatus(null);
     /* 備援來源可能只提供比使用者要求更短的期間、或還原了分割，這些都要說清楚 */
@@ -872,6 +909,8 @@ function bindUI() {
     syncUrl(); compute();
   });
 
+  /* 重試（資料載入失敗時出現） */
+  $('#retryBtn').addEventListener('click', () => { setRetry(false); loadSymbol(state.sym); });
   /* 匯出 */
   $('#csvBuys').addEventListener('click', exportBuys);
   $('#csvNav').addEventListener('click', exportNav);
@@ -916,6 +955,16 @@ function syncUIFromState() {
 
 /* ── 啟動 ───────────────────────────────────────────── */
 async function boot() {
+  /* 最常見的「一直卡在連線中」其實是直接雙擊 index.html：
+     file:// 底下瀏覽器會擋掉 ES module 與跨網域請求，資料永遠不會進來。
+     這種情況直接講清楚怎麼開，不要讓它轉圈。 */
+  if (location.protocol === 'file:') {
+    setSource('err', '', '未啟動');
+    setStatus('err', '偵測到以 file:// 直接開啟檔案：瀏覽器會阻擋 ES module 與資料請求，所以資料永遠載不進來。'
+      + '請改用 HTTP 開啟（在專案目錄執行 node scripts/serve.mjs 後連 http://localhost:8123/），'
+      + '或直接使用線上版 https://yuchen0614.github.io/dca-lab/');
+    return;
+  }
   fromUrl();
   syncUIFromState();
   bindUI();
@@ -924,13 +973,6 @@ async function boot() {
     if (isFinite(v) && v > 5) { fx = v; fxReady = true; }
     $('#fxPill').textContent = `1 USDT = ${U.fmt(fx, 2)} TWD`;
   });
-  /* 加密貨幣才需要全市場清單：美股模式不該白抓一次 Binance 的 ticker */
-  if (!isUs()) {
-    api.fetchUniverse().then(list => {
-      universe = list || [];
-      if (universe.length && allCandles.length) setSource('ok', api.status.source, `${allCandles.length} 根日線`);
-    });
-  }
   await loadSymbol(state.sym);
   /* 除錯／自動化用的把手：可以在 Console 直接看引擎結果，也方便外部驗證匯出內容 */
   window.DCALAB = {

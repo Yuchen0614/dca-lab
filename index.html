@@ -129,10 +129,47 @@
   </details>
 </section>
 
-<div class="statusbar" id="status" hidden><span class="spin"></span><span id="statusTxt"></span></div>
+<div class="statusbar" id="status" hidden><span class="spin"></span><span id="statusTxt"></span><button class="ghost" id="retryBtn" hidden>重試</button></div>
+
+<!--
+  下面的檢查刻意寫成「傳統 script」而不是 module：
+  用 file:// 直接雙擊開檔時，瀏覽器會以 CORS 規則擋掉 ES module，
+  連 js/app.js 都不會執行，所以放在 app.js 裡的檢查根本跑不到 ——
+  使用者看到的就會是「永遠停在連線中」。這裡是唯一救得到人的位置。
+-->
+<script>
+(function () {
+  if (location.protocol !== 'file:') return;
+  function show() {
+    var pill = document.getElementById('srcPill');
+    var nm = document.getElementById('srcName');
+    var txt = document.getElementById('statusTxt');
+    var el = document.getElementById('status');
+    var spin = document.querySelector('#status .spin');
+    if (pill) pill.dataset.state = 'err';
+    if (nm) nm.textContent = '';
+    if (txt) txt.textContent = '偵測到以 file:// 直接開啟檔案：瀏覽器會以 CORS 規則擋掉 ES module 與資料請求，'
+      + '所以資料永遠載不進來（畫面會一直停在「連線中」）。'
+      + '請改用 HTTP 開啟：在專案目錄執行 node scripts/serve.mjs，再用瀏覽器連 http://localhost:8123/；'
+      + '或直接使用線上版 https://yuchen0614.github.io/dca-lab/';
+    if (spin) spin.style.display = 'none';
+    if (el) { el.hidden = false; el.dataset.kind = 'err'; }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', show);
+  else show();
+})();
+</script>
 
 <!-- ── KPI ────────────────────────────────────────────── -->
-<section class="kpis" id="kpis" aria-label="主要績效"></section>
+<!-- 先放靜態骨架：JS 執行前不會是一塊空白，慢速網路下第一眼就有東西 -->
+<section class="kpis" id="kpis" aria-label="主要績效">
+  <div class="kpi"><label>總投入</label><div class="v">—</div><div class="s">載入中…</div></div>
+  <div class="kpi"><label>期末市值</label><div class="v">—</div><div class="s"></div></div>
+  <div class="kpi"><label>累積損益</label><div class="v">—</div><div class="s"></div></div>
+  <div class="kpi"><label>年化報酬 XIRR</label><div class="v">—</div><div class="s"></div></div>
+  <div class="kpi"><label>最大回撤</label><div class="v">—</div><div class="s"></div></div>
+  <div class="kpi"><label>夏普值</label><div class="v">—</div><div class="s"></div></div>
+</section>
 
 <!-- ── 圖表 ───────────────────────────────────────────── -->
 <section class="grid">

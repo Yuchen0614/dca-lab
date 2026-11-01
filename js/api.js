@@ -19,9 +19,10 @@ const EP = {
 
 /* 資料來源狀態。不能叫 api：app.js 用 `import * as api` 匯入命名空間，
    兩者同名會讓 status.source 讀到 undefined（namespace 上沒有 source 這個鍵）。 */
-export const status = { source: '—', lastError: null, cacheHits: 0, note: null, splits: [], name: null };
+export const status = { source: '—', lastError: null, cacheHits: 0, note: null, splits: [], name: null,
+  trying: null, tries: [], probe: null };
 
-async function jget(url, timeout = 15000) {
+async function jget(url, timeout = 12000) {
   const ac = new AbortController();
   const to = setTimeout(() => ac.abort(), timeout);
   try {
@@ -60,6 +61,24 @@ async function cached(key, ttl, fn) {
   return v;
 }
 
+/* ── 先探路：兩個 Binance 入口同時打一個最小請求（1 根 K 線），誰先回應就用誰 ──
+   為什麼要這樣：循序試（先 api.binance.com，逾時才換 vision）在對方被擋或很慢時，
+   使用者要等完整個逾時才會看到進度；並行探路是小請求、幾乎同時出發，
+   最慢情況下也只等一次逾時的長度。 */
+async function pickBase(symbol) {
+  const t0 = Date.now();
+  const probe = (base) => jget(`${base}/api/v3/klines?symbol=${symbol}&interval=1d&limit=1`, 7000)
+    .then(r => { if (!Array.isArray(r) || !r.length) throw new Error('空回應'); return { base, ms: Date.now() - t0 }; });
+  try {
+    const w = await Promise.any([probe(EP.binance), probe(EP.vision)]);
+    status.probe = w;
+    return w.base;
+  } catch (e) {
+    status.probe = null;
+    return null;                       // 兩個入口都不可用 → 交給後面的備援鏈
+  }
+}
+
 /* ── 日線 K 線 ──────────────────────────────────────── */
 /* 回傳 [{t, c}]；t 為 UTC 00:00。pageSize=1000（Binance 上限）。 */
 async function binanceKlines(base, symbol, startMs, endMs) {
@@ -67,7 +86,7 @@ async function binanceKlines(base, symbol, startMs, endMs) {
   let from = startMs;
   for (let i = 0; i < 12; i++) {
     const u = `${base}/api/v3/klines?symbol=${symbol}&interval=1d&limit=1000&startTime=${from}` + (endMs ? `&endTime=${endMs}` : '');
-    const j = await jget(u);
+    const j = await jget(u, 10000);
     if (!Array.isArray(j) || !j.length) break;
     for (const k of j) out.push({ t: k[0], c: num(k[4]) });
     if (j.length < 1000) break;
@@ -148,6 +167,8 @@ export async function fetchSeries(asset, symbol) {
   status.note = null;            // 每次重新評估，避免上一次的提示殘留
   status.splits = [];
   status.name = null;
+  status.tries = [];
+  status.trying = null;
   const got = await cached(key, 10 * 60e3, async () => {
     if (asset === 'us') {
       /* 主流標的先用內建快照（建置時從 Yahoo 抓、已驗證），
@@ -156,6 +177,8 @@ export async function fetchSeries(asset, symbol) {
       if (US.isCurated(symbol)) tries.push(['內建快照 · Yahoo', () => US.snapshotDaily(symbol)]);
       tries.push(['Sina（備援）', () => US.sinaDaily(symbol)]);
       for (const [name, fn] of tries) {
+        const t0 = Date.now();
+        status.trying = name;
         try {
           const out = await fn();
           if (out && out.rows && out.rows.length > 20) {
@@ -164,31 +187,53 @@ export async function fetchSeries(asset, symbol) {
             status.name = out.name || US.US_POPULAR_MAP.get(String(symbol).toUpperCase()) || null;
             status.lastError = null;
             if (!out.curated) status.note = '此代號不在內建清單，改用 Sina 備援資料（交易日可能偶有缺漏）';
+            status.tries.push({ name, ms: Date.now() - t0, ok: true });
+            status.trying = null;
             return out.rows;
           }
           status.lastError = `${name}：沒有資料`;
-        } catch (e) { status.lastError = `${name}：${e.message}`; }
+          status.tries.push({ name, ms: Date.now() - t0, ok: false, err: '沒有資料' });
+        } catch (e) {
+          status.lastError = `${name}：${e.message}`;
+          status.tries.push({ name, ms: Date.now() - t0, ok: false, err: e.message });
+        }
       }
+      status.trying = null;
       return null;
     }
-    const tries = [
-      ['Binance', () => binanceKlines(EP.binance, symbol, CRYPTO_FROM)],
-      ['Binance Vision', () => binanceKlines(EP.vision, symbol, CRYPTO_FROM)],
-      ['CoinGecko', () => cgKlines(symbol, CRYPTO_FROM)],
-      ['內建快照', async () => snapshot(symbol, CRYPTO_FROM)]
-    ];
+    /* 先用最小請求探路，誰快用誰。探針失敗代表兩個 Binance 入口都不通，
+       這時就不要再循序各等一次逾時（那會白白多花兩倍時間），直接往下走備援。 */
+    const best = await pickBase(symbol);
+    const tries = [];
+    if (best) {
+      const other = best === EP.binance ? EP.vision : EP.binance;
+      tries.push([best === EP.binance ? 'Binance' : 'Binance Vision', () => binanceKlines(best, symbol, CRYPTO_FROM)]);
+      tries.push([other === EP.binance ? 'Binance' : 'Binance Vision', () => binanceKlines(other, symbol, CRYPTO_FROM)]);
+    }
+    tries.push(['CoinGecko', () => cgKlines(symbol, CRYPTO_FROM)]);
+    tries.push(['內建快照', async () => snapshot(symbol, CRYPTO_FROM)]);
     for (const [name, fn] of tries) {
+      const t0 = Date.now();
+      status.trying = name;
       try {
         const rows = await fn();
+        const ms = Date.now() - t0;
         if (rows && rows.length > 2) {
           status.source = name;
           status.lastError = null;
+          status.tries.push({ name, ms, ok: true });
+          status.trying = null;
           if (name !== 'CoinGecko') status.note = null;   // 換到別的來源就不該再顯示它的限制
           return rows;
         }
         status.lastError = `${name}：沒有資料`;
-      } catch (e) { status.lastError = `${name}：${e.message}`; }
+        status.tries.push({ name, ms, ok: false, err: '沒有資料' });
+      } catch (e) {
+        status.lastError = `${name}：${e.message}`;
+        status.tries.push({ name, ms: Date.now() - t0, ok: false, err: e.message });
+      }
     }
+    status.trying = null;
     return null;
   });
   /* 這次是直接從快取拿到資料、完全沒連網（同一個分頁 10 分鐘內再切回來）：
@@ -212,7 +257,9 @@ export async function fetchUniverse() {
     try {
       const [info, tk] = await Promise.all([
         jget(EP.binance + '/api/v3/exchangeInfo', 20000),
-        jget(EP.binance + '/api/v3/ticker/24hr', 20000)
+        /* type=MINI 的 payload 只有 FULL 的一半（約 1MB vs 1.9MB）；
+           它沒有 priceChangePercent，所以漲跌幅自己用 last/open 推。 */
+        jget(EP.binance + '/api/v3/ticker/24hr?type=MINI', 20000)
       ]);
       const ok = new Set();
       for (const s of info.symbols || []) {
@@ -226,7 +273,10 @@ export async function fetchUniverse() {
         if (STABLE.test(base) || /(UP|DOWN|BULL|BEAR)$/.test(base)) continue;
         const qv = num(t.quoteVolume);
         if (!(qv > 0)) continue;
-        list.push({ symbol: t.symbol, base, price: num(t.lastPrice), chg: num(t.priceChangePercent), qv });
+        const lp = num(t.lastPrice), op = num(t.openPrice);
+        const chg = isFinite(t.priceChangePercent) ? num(t.priceChangePercent)
+          : (op > 0 ? (lp / op - 1) * 100 : NaN);
+        list.push({ symbol: t.symbol, base, price: lp, chg, qv });
       }
       list.sort((a, b) => b.qv - a.qv);
       return list;

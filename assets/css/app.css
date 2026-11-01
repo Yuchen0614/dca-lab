@@ -95,7 +95,7 @@ body::before{
 .field select option{background:#0b1220;color:var(--tx)}
 .field input:focus-visible,.field select:focus-visible{box-shadow:0 0 0 1px var(--cy) inset;border-radius:3px}
 .field.sub{min-width:118px}
-.field.narrow{min-width:96px}
+.field.narrow{min-width:96px;flex:1 1 auto}
 .field.wide{flex:1 1 300px;min-width:270px}
 .sym-field{z-index:70;min-width:150px}
 .amtbox{display:flex;align-items:center;gap:8px}
@@ -207,6 +207,11 @@ body::before{
 }
 .statusbar[data-kind="err"]{border-color:rgba(246,70,93,.4);color:var(--down)}
 .statusbar[data-kind="info"]{border-color:rgba(240,185,11,.28);color:var(--am)}
+/* 狀態列的訊息可能很長（含來源嘗試紀錄），讓文字有彈性、重試鈕靠右不被壓縮 */
+.statusbar{align-items:flex-start;line-height:1.55}
+.statusbar #statusTxt{flex:1;min-width:0}
+.statusbar .spin{margin-top:3px}
+.statusbar .ghost{padding:3px 10px;font-size:10px;flex:0 0 auto}
 .spin{width:11px;height:11px;border-radius:50%;border:1.5px solid rgba(91,141,255,.25);border-top-color:var(--cy);animation:sp .7s linear infinite;flex:0 0 auto}
 @keyframes sp{to{transform:rotate(360deg)}}
 
