@@ -51,6 +51,8 @@ const price = (v) => (isFinite(v) ? cs() + U.fmtPrice(v * cu()) : '—');
 /* 價格軸：四位以上的千分位小數太長會撞到繪圖區，四位以上直接去掉小數 */
 const axPrice = (v) => (Math.abs(v) >= 1000 ? U.fmt(v, 0) : U.fmtPrice(v));
 const pct = (v, dp = 2) => U.fmtPct(v, dp);
+/* 比率類指標固定兩位：夏普 0.22 不該變成 0.224079 */
+const fix2 = (v) => (isFinite(v) ? v.toFixed(2) : '—');
 const cls = (v, flip) => (isFinite(v) ? (v === 0 ? 'flat' : (flip ? v < 0 : v > 0) ? 'up' : 'down') : 'flat');
 const iso = U.isoDay;
 const isUs = () => state.asset === 'us';
@@ -659,9 +661,9 @@ function renderMetrics() {
     ['時間加權年化', pct(s.twr), '單位成本淨值的年化成長'],
     ['簡單年化', pct(s.cagr), '（市值／投入）年化，參考值'],
     ['年化波動', pct(s.annVol, 1, false), `下行波動 ${pct(s.downside, 1, false)}`],
-    ['夏普值', U.fmt(s.sharpe, 2), '無風險利率 0%'],
-    ['索提諾', U.fmt(s.sortino, 2), '只計下行風險'],
-    ['卡瑪比率', U.fmt(s.calmar, 2), '年化報酬 ÷ 最大回撤'],
+    ['夏普值', fix2(s.sharpe), '無風險利率 0%'],
+    ['索提諾', fix2(s.sortino), '只計下行風險'],
+    ['卡瑪比率', fix2(s.calmar), '年化報酬 ÷ 最大回撤'],
     ['最大回撤', pct(s.maxDD, 1), `${iso(s.ddPeak)} → ${iso(s.ddTrough)}`, 'down'],
     ['最長水下期間', `${s.underDays} 天`, '距離上一次創新高的最長天數'],
     ['目前回撤', pct(s.ddAtEnd, 1), isFinite(s.ddAtEnd) && Math.abs(s.ddAtEnd) < 0.0005 ? '位於歷史新高' : '距上次新高', s.ddAtEnd < -0.001 ? 'down' : ''],
